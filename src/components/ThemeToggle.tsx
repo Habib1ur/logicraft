@@ -1,45 +1,49 @@
-import { Moon, Monitor, Sun } from 'lucide-react';
-import { ReactNode, useEffect } from 'react';
-import { useAppStore } from '../store/useAppStore';
+import { Monitor, Moon, Sun } from 'lucide-react';
 import type { ThemeMode } from '../types';
+import { useAppStore } from '../store/useAppStore';
 
-const options: Array<{ value: ThemeMode; label: string; icon: ReactNode }> = [
-  { value: 'light', label: 'Light theme', icon: <Sun size={16} /> },
-  { value: 'dark', label: 'Dark theme', icon: <Moon size={16} /> },
-  { value: 'system', label: 'System theme', icon: <Monitor size={16} /> }
+const themes: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [
+  { value: 'light', label: 'Light', icon: Sun },
+  { value: 'dark', label: 'Dark', icon: Moon },
+  { value: 'system', label: 'System', icon: Monitor },
 ];
 
 export function ThemeToggle() {
-  const theme = useAppStore((state) => state.settings.theme);
-  const updateSettings = useAppStore((state) => state.updateSettings);
-
-  useEffect(() => {
-    const applyTheme = () => {
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      const shouldBeDark = theme === 'dark' || (theme === 'system' && prefersDark);
-      document.documentElement.classList.toggle('dark', shouldBeDark);
-    };
-
-    applyTheme();
-    const media = window.matchMedia('(prefers-color-scheme: dark)');
-    media.addEventListener('change', applyTheme);
-    return () => media.removeEventListener('change', applyTheme);
-  }, [theme]);
-
-  const currentIndex = options.findIndex((option) => option.value === theme);
-  const next = options[(currentIndex + 1) % options.length];
-  const current = options[currentIndex] ?? options[2];
+  const theme = useAppStore((store) => store.theme);
+  const setTheme = useAppStore((store) => store.setTheme);
+  const active = themes.find((item) => item.value === theme) ?? themes[2];
+  const Icon = active.icon;
 
   return (
-    <button
-      type="button"
-      onClick={() => updateSettings({ theme: next.value })}
-      className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-      aria-label={`Current ${current.label}. Switch to ${next.label}`}
-      title={`Theme: ${theme}`}
-    >
-      {current.icon}
-      <span className="hidden sm:inline">{theme}</span>
-    </button>
+    <div className="group relative">
+      <button
+        type="button"
+        className="focus-ring inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-indigo-300 hover:text-indigo-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:text-indigo-300"
+        aria-label="Change theme"
+      >
+        <Icon size={17} />
+        <span className="hidden sm:inline">{active.label}</span>
+      </button>
+      <div className="invisible absolute right-0 z-40 mt-2 w-40 translate-y-1 rounded-2xl border border-slate-200 bg-white p-1 opacity-0 shadow-xl shadow-slate-200/70 transition group-hover:visible group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:visible group-focus-within:translate-y-0 group-focus-within:opacity-100 dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/30">
+        {themes.map((item) => {
+          const ItemIcon = item.icon;
+          return (
+            <button
+              key={item.value}
+              type="button"
+              className={`focus-ring flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition ${
+                theme === item.value
+                  ? 'bg-indigo-50 font-semibold text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-200'
+                  : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+              }`}
+              onClick={() => setTheme(item.value)}
+            >
+              <ItemIcon size={16} />
+              {item.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }

@@ -1,151 +1,190 @@
-import { BooleanParseError, collectIntermediateLabels, evaluateAst, parseBooleanExpression, stringifyAst } from './booleanParser';
-import type { AppSettings, TruthTableResult, TruthRow } from '../types';
+import { collectIntermediateLabels, evaluateAst, parseBooleanExpression, parseNotationInput } from './booleanParser';
+import { simplifyFromTruthTable } from './simplifier';
+import type { AppSettings, BooleanValue, IntermediateColumn, NotationInput, ParseFailure, SimplificationResultType, TruthRow, TruthTableResult } from '../types';
 
-const DEFAULT_VARIABLES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+export interface GenerateResult {
+  ok: true;
+  table: TruthTableResult;
+  simplification: SimplificationResultType;
+  warning?: string;
+}
 
-type SpecialNotation = {
-  kind: 'minterm' | 'maxterm';
-  variables: string[];
-  indexes: number[];
-  raw: string;
-};
+export interface GenerateError {
+  ok: false;
+  error: string;
+  suggestion: string;
+}
 
-const parseNumberList = (value: string): number[] => {
-  if (!value.trim()) return [];
-  return value
-    .split(/[\s,]+/)
-    .filter(Boolean)
-    .map((part) => {
-      const n = Number(part);
-      if (!Number.isInteger(n) || n < 0) {
-        throw new BooleanParseError(`Invalid minterm/maxterm index "${part}".`, 'Use whole numbers such as 0, 1, 2, 3.');
-      }
-      return n;
-    });
-};
+export type GenerateTruthTableResult = GenerateResult | GenerateError;
 
-export const parseSpecialNotation = (expression: string): SpecialNotation | null => {
-  const normalized = expression.trim().replace(/∑/g, 'Σ').replace(/π/g, 'Π');
-  const regex = /^(?:[A-Za-z]\s*(?:\(([^)]*)\))?\s*=\s*)?([ΣΠ])\s*([mM])\s*\(([^)]*)\)$/i;
-  const match = normalized.match(regex);
-  if (!match) return null;
+function isParseFailure(value: NotationInput | ParseFailure | null): value is ParseFailure {
+  return Boolean(value && 'ok' in value && value.ok === false);
+}
 
-  const [, variableGroup, symbol, listType, numberGroup] = match;
-  const variables = variableGroup
-    ? variableGroup
-        .split(/[\s,]+/)
-        .join('')
-        .toUpperCase()
-        .split('')
-        .filter(Boolean)
-    : [];
-  const indexes = parseNumberList(numberGroup);
-  const kind = symbol === 'Σ' ? 'minterm' : 'maxterm';
-  const maxIndex = Math.max(...indexes, 0);
-  const inferredCount = Math.max(1, Math.ceil(Math.log2(maxIndex + 1)));
-  const finalVariables = variables.length > 0 ? variables : DEFAULT_VARIABLES.slice(0, inferredCount);
-
-  if (finalVariables.length > 10) {
-    throw new BooleanParseError('Too many variables in notation.', 'Use 6 variables or fewer for a smooth browser truth table.');
-  }
-
-  const limit = 2 ** finalVariables.length;
-  const invalidIndex = indexes.find((index) => index >= limit);
-  if (invalidIndex !== undefined) {
-    throw new BooleanParseError(
-      `Index ${invalidIndex} does not fit ${finalVariables.length} variables.`,
-      `For ${finalVariables.length} variables, valid indexes are 0 to ${limit - 1}.`
-    );
-  }
-
-  return {
-    kind,
-    variables: finalVariables,
-    indexes: Array.from(new Set(indexes)).sort((a, b) => a - b),
-    raw: normalized
-  };
-};
-
-export const orderedVariables = (detected: string[], preferred: string[]): string[] => {
-  const preferredSet = new Set(preferred);
-  const known = preferred.filter((variable) => detected.includes(variable));
-  const remaining = detected.filter((variable) => !preferredSet.has(variable)).sort();
-  return [...known, ...remaining];
-};
-
-const buildAssignment = (index: number, variables: string[]): Record<string, boolean> => {
-  const assignment: Record<string, boolean> = {};
-  variables.forEach((variable, position) => {
-    const bitPosition = variables.length - position - 1;
-    assignment[variable] = Boolean((index >> bitPosition) & 1);
-  });
-  return assignment;
-};
-
-export const rowIndexFromAssignment = (assignment: Record<string, boolean>, variables: string[]) => {
-  return variables.reduce((value, variable) => (value << 1) | (assignment[variable] ? 1 : 0), 0);
-};
-
-export const generateTruthTable = (expression: string, settings: AppSettings): TruthTableResult => {
-  const special = parseSpecialNotation(expression);
-
-  if (special) {
-    const variables = orderedVariables(special.variables, settings.variableOrder);
-    const rowCount = 2 ** variables.length;
-    const indexSet = new Set(special.indexes);
-    const rows: TruthRow[] = Array.from({ length: rowCount }, (_, index) => {
-      const assignment = buildAssignment(index, variables);
-      const output = special.kind === 'minterm' ? indexSet.has(index) : !indexSet.has(index);
-      return { index, assignment, intermediates: {}, output };
-    });
-
+export function generateTruthTable(expression: string, settings: AppSettings): GenerateTruthTableResult {
+  const trimmed = expression.trim();
+  if (!trimmed) {
     return {
-      variables,
-      rows,
-      intermediateColumns: [],
-      expressionLabel: 'F',
-      warning: variables.length > 6 ? 'Large truth table: consider reducing variable count or using pagination.' : undefined,
-      mode: special.kind
+      ok: false,
+      error: 'Expression is empty.',
+      suggestion: 'Try A + B, A.B + C\', or Σm(0,2,4,6).',
     };
   }
 
-  const parsed = parseBooleanExpression(expression);
-  const variables = orderedVariables(parsed.variables, settings.variableOrder);
-  const rowCount = 2 ** variables.length;
-  const rootLabel = stringifyAst(parsed.ast);
-  const intermediateColumns = collectIntermediateLabels(parsed.ast, rootLabel);
+  const notation = parseNotationInput(trimmed);
+  if (isParseFailure(notation)) {
+    return {
+      ok: false,
+      error: notation.error,
+      suggestion: notation.suggestion,
+    };
+  }
 
-  const rows = Array.from({ length: rowCount }, (_, index) => {
-    const assignment = buildAssignment(index, variables);
-    const intermediates: Record<string, boolean> = {};
-    const output = evaluateAst(parsed.ast, assignment, intermediates, rootLabel);
-    return { index, assignment, intermediates, output };
-  });
+  if (notation) {
+    const variables = applyVariableOrder(notation.variables, settings.variableOrder);
+    if (variables.length > settings.maxVariables) return tooManyVariables(variables.length, settings.maxVariables);
+    const rows = buildRowsFromNotation(variables, notation.indices, notation.source);
+    const table: TruthTableResult = {
+      expression: notation.normalizedExpression,
+      variables,
+      rows,
+      intermediateColumns: [],
+      source: notation.source,
+    };
+    return {
+      ok: true,
+      table,
+      simplification: simplifyFromTruthTable(table),
+      warning: largeTableWarning(variables.length),
+    };
+  }
 
-  return {
+  const parsed = parseBooleanExpression(trimmed);
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      error: parsed.error,
+      suggestion: parsed.suggestion,
+    };
+  }
+
+  const variables = applyVariableOrder(parsed.variables, settings.variableOrder);
+  if (variables.length > settings.maxVariables) return tooManyVariables(variables.length, settings.maxVariables);
+
+  const intermediateLabels = settings.showIntermediateColumns ? collectIntermediateLabels(parsed.ast) : [];
+  const rows = buildRowsFromExpression(variables, parsed.ast, settings.showIntermediateColumns);
+  const columns: IntermediateColumn[] = intermediateLabels
+    .filter((label) => label !== parsed.ast.display)
+    .map((label) => ({ key: label, label }));
+
+  const table: TruthTableResult = {
+    expression: parsed.normalizedExpression,
     variables,
     rows,
-    intermediateColumns,
-    expressionLabel: rootLabel || 'F',
-    warning: variables.length > 6 ? 'Large truth table: consider reducing variable count or using pagination.' : undefined,
-    mode: 'expression'
+    intermediateColumns: columns,
+    source: 'expression',
   };
-};
 
-export const truthTableToCsv = (table: TruthTableResult, showIntermediate: boolean, formatValue: (value: boolean) => string) => {
-  const headers = [
-    ...table.variables,
-    ...(showIntermediate ? table.intermediateColumns : []),
-    'F'
-  ];
-  const lines = [headers.join(',')];
-  table.rows.forEach((row) => {
-    const values = [
-      ...table.variables.map((variable) => formatValue(row.assignment[variable])),
-      ...(showIntermediate ? table.intermediateColumns.map((column) => formatValue(row.intermediates[column])) : []),
-      formatValue(row.output)
-    ];
-    lines.push(values.join(','));
+  return {
+    ok: true,
+    table,
+    simplification: simplifyFromTruthTable(table),
+    warning: largeTableWarning(variables.length),
+  };
+}
+
+function buildRowsFromExpression(variables: string[], ast: Parameters<typeof evaluateAst>[0], showIntermediate: boolean): TruthRow[] {
+  const rowCount = 2 ** variables.length;
+  const rows: TruthRow[] = [];
+
+  for (let index = 0; index < rowCount; index += 1) {
+    const values = rowValuesFromIndex(index, variables);
+    const intermediates: Record<string, BooleanValue> = {};
+    const output = evaluateAst(ast, values, showIntermediate ? intermediates : undefined);
+    rows.push({ index, values, intermediates, output });
+  }
+
+  return rows;
+}
+
+function buildRowsFromNotation(variables: string[], indices: number[], source: 'minterm' | 'maxterm'): TruthRow[] {
+  const selected = new Set(indices);
+  const rowCount = 2 ** variables.length;
+  const rows: TruthRow[] = [];
+
+  for (let index = 0; index < rowCount; index += 1) {
+    const values = rowValuesFromIndex(index, variables);
+    const output: BooleanValue = source === 'minterm' ? (selected.has(index) ? 1 : 0) : selected.has(index) ? 0 : 1;
+    rows.push({ index, values, intermediates: {}, output });
+  }
+
+  return rows;
+}
+
+export function rowValuesFromIndex(index: number, variables: string[]): Record<string, BooleanValue> {
+  const values: Record<string, BooleanValue> = {};
+  variables.forEach((variable, position) => {
+    const shift = variables.length - position - 1;
+    values[variable] = ((index >> shift) & 1) as BooleanValue;
   });
-  return lines.join('\n');
-};
+  return values;
+}
+
+function applyVariableOrder(variables: string[], order: string[]): string[] {
+  const known = order.filter((variable) => variables.includes(variable));
+  const remaining = variables.filter((variable) => !known.includes(variable));
+  return [...known, ...remaining];
+}
+
+function largeTableWarning(variableCount: number): string | undefined {
+  if (variableCount >= 6) return `${variableCount} variables produce ${2 ** variableCount} rows. Use pagination if the table feels large.`;
+  return undefined;
+}
+
+function tooManyVariables(count: number, max: number): GenerateError {
+  return {
+    ok: false,
+    error: `Too many variables: ${count}.`,
+    suggestion: `TruthCraft currently allows up to ${max} variables for smooth browser performance. Reduce variables or increase the limit in Settings.`,
+  };
+}
+
+export function truthTableToCsv(table: TruthTableResult, outputFormatter: (value: BooleanValue) => string): string {
+  const headers = [...table.variables, ...table.intermediateColumns.map((column) => column.label), 'F'];
+  const body = table.rows.map((row) => {
+    const variableValues = table.variables.map((variable) => outputFormatter(row.values[variable]));
+    const intermediateValues = table.intermediateColumns.map((column) => outputFormatter(row.intermediates[column.key] ?? row.output));
+    return [...variableValues, ...intermediateValues, outputFormatter(row.output)].join(',');
+  });
+  return [headers.join(','), ...body].join('\n');
+}
+
+export function truthTableToText(table: TruthTableResult, simplification: SimplificationResultType, outputFormatter: (value: BooleanValue) => string): string {
+  const headers = [...table.variables, ...table.intermediateColumns.map((column) => column.label), 'F'];
+  const rows = table.rows.map((row) => {
+    const values = [
+      ...table.variables.map((variable) => outputFormatter(row.values[variable])),
+      ...table.intermediateColumns.map((column) => outputFormatter(row.intermediates[column.key] ?? row.output)),
+      outputFormatter(row.output),
+    ];
+    return values.join(' | ');
+  });
+
+  return [
+    'TruthCraft Solution',
+    `Expression: ${table.expression}`,
+    '',
+    'Truth Table',
+    headers.join(' | '),
+    '-'.repeat(headers.join(' | ').length),
+    ...rows,
+    '',
+    'Simplification',
+    `Simplified SOP: ${simplification.simplifiedSop}`,
+    `Simplified POS: ${simplification.simplifiedPos}`,
+    `Canonical SOP: ${simplification.canonicalSop}`,
+    `Canonical POS: ${simplification.canonicalPos}`,
+    `Minterms: ${simplification.mintermNotation}`,
+    `Maxterms: ${simplification.maxtermNotation}`,
+  ].join('\n');
+}

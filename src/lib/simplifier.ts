@@ -1,248 +1,212 @@
-import type { SimplificationResult, TruthTableResult } from '../types';
+import type { SimplificationResultType, TruthTableResult } from '../types';
 
-type Implicant = {
-  pattern: string;
-  minterms: number[];
-  used?: boolean;
-};
+interface Implicant {
+  bits: string;
+  covers: Set<number>;
+}
 
-const bits = (index: number, count: number) => index.toString(2).padStart(count, '0');
-const unique = <T,>(items: T[]) => Array.from(new Set(items));
+export function simplifyFromTruthTable(table: TruthTableResult): SimplificationResultType {
+  const variables = table.variables;
+  const rowCount = 2 ** variables.length;
+  const minterms = table.rows.filter((row) => row.output === 1).map((row) => row.index);
+  const maxterms = table.rows.filter((row) => row.output === 0).map((row) => row.index);
+  const isTautology = minterms.length === rowCount;
+  const isContradiction = minterms.length === 0;
 
-const literalCount = (pattern: string) => [...pattern].filter((char) => char !== '-').length;
+  const sopImplicants = minimizeMinterms(minterms, variables.length);
+  const posImplicants = minimizeMinterms(maxterms, variables.length);
 
-const differsByOneBit = (a: string, b: string) => {
-  let diff = 0;
-  let combined = '';
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] === b[i]) {
-      combined += a[i];
-    } else {
-      diff += 1;
-      combined += '-';
-    }
-  }
-  return diff === 1 ? combined : null;
-};
+  const simplifiedSop = isContradiction
+    ? '0'
+    : isTautology
+      ? '1'
+      : sopImplicants.map((implicant) => implicantToSopTerm(implicant.bits, variables)).join(' + ');
 
-const covers = (pattern: string, index: number, count: number) => {
-  const bitString = bits(index, count);
-  return [...pattern].every((char, i) => char === '-' || char === bitString[i]);
-};
+  const simplifiedPos = isTautology
+    ? '1'
+    : isContradiction
+      ? '0'
+      : posImplicants.map((implicant) => implicantToPosClause(implicant.bits, variables)).join('.');
 
-const mergeImplicants = (a: Implicant, b: Implicant): Implicant | null => {
-  const combined = differsByOneBit(a.pattern, b.pattern);
-  if (!combined) return null;
+  const canonicalSop = isContradiction ? '0' : minterms.map((index) => mintermToProduct(index, variables)).join(' + ');
+  const canonicalPos = isTautology ? '1' : maxterms.map((index) => maxtermToSum(index, variables)).join('.');
+
+  const mintermNotation = `F(${variables.join(',')}) = Σm(${minterms.join(',')})`;
+  const maxtermNotation = `F(${variables.join(',')}) = ΠM(${maxterms.join(',')})`;
+
   return {
-    pattern: combined,
-    minterms: unique([...a.minterms, ...b.minterms]).sort((x, y) => x - y)
+    original: table.expression,
+    simplifiedSop,
+    simplifiedPos,
+    canonicalSop,
+    canonicalPos,
+    mintermNotation,
+    maxtermNotation,
+    minterms,
+    maxterms,
+    variables,
+    isTautology,
+    isContradiction,
+    steps: buildLearningSteps(table.expression, variables, minterms, maxterms, simplifiedSop, simplifiedPos),
   };
-};
+}
 
-const getPrimeImplicants = (ones: number[], variableCount: number): Implicant[] => {
+function buildLearningSteps(expression: string, variables: string[], minterms: number[], maxterms: number[], sop: string, pos: string): string[] {
+  const totalRows = 2 ** variables.length;
+  return [
+    `TruthCraft detected variables ${variables.join(', ') || 'none'} from ${expression}.`,
+    `${variables.length} variable(s) create ${totalRows} truth-table row(s).`,
+    `Rows where F = 1 are minterms: ${minterms.length ? minterms.join(', ') : 'none'}.`,
+    `Rows where F = 0 are maxterms: ${maxterms.length ? maxterms.join(', ') : 'none'}.`,
+    `The simplified SOP groups the 1-output rows into larger implicants: ${sop}.`,
+    `The simplified POS groups the 0-output rows and converts them into product-of-sums form: ${pos}.`,
+  ];
+}
+
+function minimizeMinterms(minterms: number[], variableCount: number): Implicant[] {
+  if (minterms.length === 0) return [];
+  if (minterms.length === 2 ** variableCount) return [{ bits: '-'.repeat(variableCount), covers: new Set(minterms) }];
+
   let groups = new Map<number, Implicant[]>();
-  ones.forEach((minterm) => {
-    const pattern = bits(minterm, variableCount);
-    const onesCount = [...pattern].filter((bit) => bit === '1').length;
-    groups.set(onesCount, [...(groups.get(onesCount) ?? []), { pattern, minterms: [minterm] }]);
+  minterms.forEach((minterm) => {
+    const bits = toBinaryBits(minterm, variableCount);
+    const ones = countOnes(bits);
+    const list = groups.get(ones) ?? [];
+    list.push({ bits, covers: new Set([minterm]) });
+    groups.set(ones, list);
   });
 
-  const primes = new Map<string, Implicant>();
+  const primeMap = new Map<string, Implicant>();
 
   while (groups.size > 0) {
     const nextGroups = new Map<number, Implicant[]>();
-    const keys = [...groups.keys()].sort((a, b) => a - b);
-    const usedPatterns = new Set<string>();
+    const used = new Set<string>();
+    const sortedKeys = Array.from(groups.keys()).sort((a, b) => a - b);
 
-    keys.forEach((key) => {
+    for (const key of sortedKeys) {
       const current = groups.get(key) ?? [];
       const next = groups.get(key + 1) ?? [];
-      current.forEach((a) => {
-        next.forEach((b) => {
-          const merged = mergeImplicants(a, b);
-          if (merged) {
-            usedPatterns.add(a.pattern);
-            usedPatterns.add(b.pattern);
-            const groupKey = [...merged.pattern].filter((bit) => bit === '1').length;
-            const existing = nextGroups.get(groupKey) ?? [];
-            if (!existing.some((item) => item.pattern === merged.pattern)) {
-              nextGroups.set(groupKey, [...existing, merged]);
-            }
-          }
-        });
-      });
-    });
+      for (const a of current) {
+        for (const b of next) {
+          const combinedBits = combineBits(a.bits, b.bits);
+          if (!combinedBits) continue;
+          used.add(signature(a));
+          used.add(signature(b));
+          const covers = new Set([...a.covers, ...b.covers]);
+          const combined: Implicant = { bits: combinedBits, covers };
+          const ones = countOnes(combinedBits);
+          const list = nextGroups.get(ones) ?? [];
+          if (!list.some((item) => item.bits === combined.bits)) list.push(combined);
+          nextGroups.set(ones, list);
+        }
+      }
+    }
 
     groups.forEach((items) => {
       items.forEach((item) => {
-        if (!usedPatterns.has(item.pattern)) primes.set(item.pattern, item);
+        if (!used.has(signature(item))) primeMap.set(item.bits, item);
       });
     });
 
     groups = nextGroups;
   }
 
-  return [...primes.values()].sort((a, b) => literalCount(a.pattern) - literalCount(b.pattern));
-};
+  return selectEssentialImplicants(Array.from(primeMap.values()), minterms);
+}
 
-const findMinimalCover = (targets: number[], primeImplicants: Implicant[], variableCount: number): Implicant[] => {
-  const uncovered = new Set(targets);
+function selectEssentialImplicants(primes: Implicant[], minterms: number[]): Implicant[] {
+  const uncovered = new Set(minterms);
   const selected = new Map<string, Implicant>();
-  const coverMap = new Map<number, Implicant[]>();
 
-  targets.forEach((target) => {
-    coverMap.set(
-      target,
-      primeImplicants.filter((implicant) => covers(implicant.pattern, target, variableCount))
-    );
-  });
-
-  targets.forEach((target) => {
-    const coverers = coverMap.get(target) ?? [];
-    if (coverers.length === 1) {
-      selected.set(coverers[0].pattern, coverers[0]);
+  minterms.forEach((minterm) => {
+    const covering = primes.filter((prime) => prime.covers.has(minterm));
+    if (covering.length === 1) {
+      selected.set(covering[0].bits, covering[0]);
+      covering[0].covers.forEach((covered) => uncovered.delete(covered));
     }
   });
 
-  selected.forEach((implicant) => {
-    targets.forEach((target) => {
-      if (covers(implicant.pattern, target, variableCount)) uncovered.delete(target);
-    });
-  });
-
-  if (uncovered.size === 0) return [...selected.values()];
-
-  const candidates = primeImplicants.filter((implicant) => !selected.has(implicant.pattern));
-  if (candidates.length <= 22) {
-    let best: Implicant[] | null = null;
-    const remaining = [...uncovered];
-
-    const search = (start: number, picked: Implicant[]) => {
-      if (best && picked.length >= best.length) return;
-      const isCovered = remaining.every((target) => picked.some((implicant) => covers(implicant.pattern, target, variableCount)));
-      if (isCovered) {
-        if (
-          !best ||
-          picked.length < best.length ||
-          (picked.length === best.length &&
-            picked.reduce((sum, item) => sum + literalCount(item.pattern), 0) < best.reduce((sum, item) => sum + literalCount(item.pattern), 0))
-        ) {
-          best = [...picked];
-        }
-        return;
-      }
-
-      for (let i = start; i < candidates.length; i += 1) {
-        search(i + 1, [...picked, candidates[i]]);
-      }
-    };
-
-    search(0, []);
-    return [...selected.values(), ...(best ?? [])];
-  }
-
-  // Fallback for unusually complex 6-variable cases: greedy cover keeps the UI fast.
   while (uncovered.size > 0) {
-    const best = candidates
-      .filter((candidate) => !selected.has(candidate.pattern))
-      .map((candidate) => ({
-        candidate,
-        covers: [...uncovered].filter((target) => covers(candidate.pattern, target, variableCount)).length
+    const best = primes
+      .filter((prime) => !selected.has(prime.bits))
+      .map((prime) => ({
+        prime,
+        score: Array.from(prime.covers).filter((item) => uncovered.has(item)).length,
+        literals: countLiterals(prime.bits),
       }))
-      .sort((a, b) => b.covers - a.covers || literalCount(a.candidate.pattern) - literalCount(b.candidate.pattern))[0];
+      .sort((a, b) => b.score - a.score || a.literals - b.literals)[0];
 
-    if (!best || best.covers === 0) break;
-    selected.set(best.candidate.pattern, best.candidate);
-    [...uncovered].forEach((target) => {
-      if (covers(best.candidate.pattern, target, variableCount)) uncovered.delete(target);
-    });
+    if (!best || best.score === 0) break;
+    selected.set(best.prime.bits, best.prime);
+    best.prime.covers.forEach((covered) => uncovered.delete(covered));
   }
 
-  return [...selected.values()];
-};
+  return Array.from(selected.values()).sort((a, b) => a.bits.localeCompare(b.bits));
+}
 
-const productTerm = (pattern: string, variables: string[]) => {
-  const literals = [...pattern].flatMap((bit, index) => {
-    if (bit === '-') return [];
-    return bit === '1' ? variables[index] : `${variables[index]}'`;
-  });
-  if (literals.length === 0) return '1';
-  return literals.join('.');
-};
+function combineBits(a: string, b: string): string | null {
+  let differences = 0;
+  let combined = '';
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] === b[i]) combined += a[i];
+    else {
+      differences += 1;
+      combined += '-';
+    }
+    if (differences > 1) return null;
+  }
+  return differences === 1 ? combined : null;
+}
 
-const sumClause = (pattern: string, variables: string[]) => {
-  const literals = [...pattern].flatMap((bit, index) => {
-    if (bit === '-') return [];
-    return bit === '0' ? variables[index] : `${variables[index]}'`;
-  });
-  if (literals.length === 0) return '0';
-  return `(${literals.join(' + ')})`;
-};
+function toBinaryBits(value: number, length: number): string {
+  return value.toString(2).padStart(length, '0');
+}
 
-const canonicalSOP = (minterms: number[], variables: string[]) => {
-  const total = 2 ** variables.length;
-  if (minterms.length === 0) return '0';
-  if (minterms.length === total) return '1';
-  return minterms.map((index) => productTerm(bits(index, variables.length), variables)).join(' + ');
-};
+function countOnes(bits: string): number {
+  return bits.split('').filter((bit) => bit === '1').length;
+}
 
-const canonicalPOS = (maxterms: number[], variables: string[]) => {
-  const total = 2 ** variables.length;
-  if (maxterms.length === 0) return '1';
-  if (maxterms.length === total) return '0';
-  return maxterms.map((index) => sumClause(bits(index, variables.length), variables)).join('.');
-};
+function countLiterals(bits: string): number {
+  return bits.split('').filter((bit) => bit !== '-').length;
+}
 
-const simplifySOP = (minterms: number[], variables: string[]) => {
-  const total = 2 ** variables.length;
-  if (minterms.length === 0) return { expression: '0', implicants: [] as Implicant[] };
-  if (minterms.length === total) return { expression: '1', implicants: [{ pattern: '-'.repeat(variables.length), minterms }] };
-  const primes = getPrimeImplicants(minterms, variables.length);
-  const cover = findMinimalCover(minterms, primes, variables.length);
-  return {
-    expression: cover.map((implicant) => productTerm(implicant.pattern, variables)).join(' + '),
-    implicants: cover
-  };
-};
+function signature(implicant: Implicant): string {
+  return `${implicant.bits}:${Array.from(implicant.covers).sort((a, b) => a - b).join(',')}`;
+}
 
-const simplifyPOS = (maxterms: number[], variables: string[]) => {
-  const total = 2 ** variables.length;
-  if (maxterms.length === 0) return { expression: '1', implicants: [] as Implicant[] };
-  if (maxterms.length === total) return { expression: '0', implicants: [{ pattern: '-'.repeat(variables.length), minterms: maxterms }] };
-  const primes = getPrimeImplicants(maxterms, variables.length);
-  const cover = findMinimalCover(maxterms, primes, variables.length);
-  return {
-    expression: cover.map((implicant) => sumClause(implicant.pattern, variables)).join('.'),
-    implicants: cover
-  };
-};
+function mintermToProduct(index: number, variables: string[]): string {
+  const bits = toBinaryBits(index, variables.length);
+  return bits
+    .split('')
+    .map((bit, position) => (bit === '1' ? variables[position] : `${variables[position]}'`))
+    .join('.');
+}
 
-export const simplifyTruthTable = (table: TruthTableResult, originalExpression: string): SimplificationResult => {
-  const minterms = table.rows.filter((row) => row.output).map((row) => row.index);
-  const maxterms = table.rows.filter((row) => !row.output).map((row) => row.index);
-  const sop = simplifySOP(minterms, table.variables);
-  const pos = simplifyPOS(maxterms, table.variables);
-  const variablesLabel = table.variables.join(',');
+function maxtermToSum(index: number, variables: string[]): string {
+  const bits = toBinaryBits(index, variables.length);
+  const clause = bits
+    .split('')
+    .map((bit, position) => (bit === '0' ? variables[position] : `${variables[position]}'`))
+    .join(' + ');
+  return `(${clause})`;
+}
 
-  const steps = [
-    `Detected variables in order: ${table.variables.join(', ') || 'none'}.`,
-    `Rows where F = 1 give minterms: ${minterms.length ? minterms.join(', ') : 'none'}.`,
-    `Rows where F = 0 give maxterms: ${maxterms.length ? maxterms.join(', ') : 'none'}.`,
-    'Canonical SOP is built by OR-ing every minterm where the output is 1.',
-    'Canonical POS is built by AND-ing every maxterm where the output is 0.',
-    'Simplified forms are minimized using a Quine-McCluskey style implicant cover for student-friendly exact results up to 6 variables.'
-  ];
+function implicantToSopTerm(bits: string, variables: string[]): string {
+  const literals = bits
+    .split('')
+    .flatMap((bit, position) => {
+      if (bit === '-') return [];
+      return bit === '1' ? variables[position] : `${variables[position]}'`;
+    });
+  return literals.length ? literals.join('.') : '1';
+}
 
-  return {
-    original: originalExpression,
-    simplifiedSOP: sop.expression,
-    simplifiedPOS: pos.expression,
-    canonicalSOP: canonicalSOP(minterms, table.variables),
-    canonicalPOS: canonicalPOS(maxterms, table.variables),
-    minterms,
-    maxterms,
-    mintermNotation: `F(${variablesLabel}) = Σm(${minterms.join(',')})`,
-    maxtermNotation: `F(${variablesLabel}) = ΠM(${maxterms.join(',')})`,
-    steps
-  };
-};
+function implicantToPosClause(bits: string, variables: string[]): string {
+  const literals = bits
+    .split('')
+    .flatMap((bit, position) => {
+      if (bit === '-') return [];
+      return bit === '1' ? `${variables[position]}'` : variables[position];
+    });
+  return literals.length ? `(${literals.join(' + ')})` : '0';
+}

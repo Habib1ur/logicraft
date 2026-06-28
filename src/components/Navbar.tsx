@@ -1,69 +1,47 @@
-import { Download, FileJson, RotateCcw, Save, Upload } from 'lucide-react';
-import { useRef } from 'react';
+import { BrainCircuit, Download, RotateCcw, Save, Upload } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
-import { useAppStore } from '../store/useAppStore';
-import { downloadTextFile } from '../utils/storage';
 
-type Props = {
-  projectJson: string;
-};
+interface NavbarProps {
+  onSave: () => void;
+  onExport: () => void;
+  onImportClick: () => void;
+  onReset: () => void;
+}
 
-export function Navbar({ projectJson }: Props) {
-  const saveExpression = useAppStore((state) => state.saveExpression);
-  const importProject = useAppStore((state) => state.importProject);
-  const resetApp = useAppStore((state) => state.resetApp);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const handleImport = async (file: File | undefined) => {
-    if (!file) return;
-    const text = await file.text();
-    try {
-      importProject(JSON.parse(text));
-    } catch {
-      alert('Invalid project JSON. Please import a valid TruthCraft project file.');
-    }
-  };
-
+export function Navbar({ onSave, onExport, onImportClick, onReset }: NavbarProps) {
   return (
-    <nav className="sticky top-0 z-30 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/75">
-      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
+    <header className="sticky top-0 z-30 border-b border-slate-200/70 bg-white/80 backdrop-blur-xl dark:border-slate-800/80 dark:bg-slate-950/80">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:px-8">
         <div className="flex items-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500 to-cyan-500 text-lg font-black text-white shadow-lg shadow-indigo-500/25">
-            TC
+          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-indigo-600 to-cyan-500 text-white shadow-lg shadow-indigo-500/20">
+            <BrainCircuit size={24} />
           </div>
           <div>
-            <h1 className="text-lg font-black tracking-tight text-slate-950 dark:text-white sm:text-xl">TruthCraft</h1>
-            <p className="hidden text-xs text-slate-500 dark:text-slate-400 sm:block">Truth tables, Boolean simplification, and digital logic learning.</p>
+            <h1 className="text-xl font-black tracking-tight text-slate-950 dark:text-white">TruthCraft</h1>
+            <p className="hidden text-xs font-medium text-slate-500 dark:text-slate-400 sm:block">Truth tables, simplification, and digital logic learning</p>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <nav className="flex flex-wrap items-center gap-2" aria-label="TruthCraft actions">
           <ThemeToggle />
-          <button className="nav-btn" type="button" onClick={() => saveExpression()} aria-label="Save current expression">
-            <Save size={16} /> <span>Save</span>
+          <button className="focus-ring inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-700 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200" type="button" onClick={onSave}>
+            <Save size={16} />
+            <span className="hidden sm:inline">Save</span>
           </button>
-          <button className="nav-btn" type="button" onClick={() => downloadTextFile('truthcraft-project.json', projectJson, 'application/json')} aria-label="Export project JSON">
-            <FileJson size={16} /> <span>Export</span>
+          <button className="focus-ring inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-indigo-300 hover:text-indigo-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:text-indigo-300" type="button" onClick={onExport}>
+            <Download size={16} />
+            <span className="hidden sm:inline">Export</span>
           </button>
-          <button className="nav-btn" type="button" onClick={() => fileInputRef.current?.click()} aria-label="Import project JSON">
-            <Upload size={16} /> <span>Import</span>
+          <button className="focus-ring inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-indigo-300 hover:text-indigo-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200 dark:hover:text-indigo-300" type="button" onClick={onImportClick}>
+            <Upload size={16} />
+            <span className="hidden sm:inline">Import</span>
           </button>
-          <button className="nav-btn" type="button" onClick={() => downloadTextFile('truthcraft-full-solution.txt', projectJson)} aria-label="Download project data as text">
-            <Download size={16} /> <span className="hidden sm:inline">Text</span>
+          <button className="focus-ring inline-flex items-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700 shadow-sm transition hover:bg-rose-100 dark:border-rose-950 dark:bg-rose-950/40 dark:text-rose-200" type="button" onClick={onReset}>
+            <RotateCcw size={16} />
+            <span className="hidden sm:inline">Reset</span>
           </button>
-          <button className="nav-btn-danger" type="button" onClick={resetApp} aria-label="Reset app">
-            <RotateCcw size={16} /> <span>Reset</span>
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="application/json,.json"
-            className="hidden"
-            onChange={(event) => handleImport(event.target.files?.[0])}
-            aria-label="Import TruthCraft JSON file"
-          />
-        </div>
+        </nav>
       </div>
-    </nav>
+    </header>
   );
 }

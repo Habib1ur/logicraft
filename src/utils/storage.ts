@@ -1,14 +1,14 @@
-export const safeJsonParse = <T,>(value: string | null, fallback: T): T => {
+export function safeJsonParse<T>(value: string | null, fallback: T): T {
   if (!value) return fallback;
   try {
     return JSON.parse(value) as T;
   } catch {
     return fallback;
   }
-};
+}
 
-export const downloadTextFile = (filename: string, content: string, mime = 'text/plain;charset=utf-8') => {
-  const blob = new Blob([content], { type: mime });
+export function downloadFile(filename: string, content: string, mimeType: string): void {
+  const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
@@ -17,17 +17,29 @@ export const downloadTextFile = (filename: string, content: string, mime = 'text
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
-};
+}
 
-export const copyToClipboard = async (text: string) => {
-  if (!navigator.clipboard) {
+export async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
     const area = document.createElement('textarea');
     area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
     document.body.appendChild(area);
+    area.focus();
     area.select();
-    document.execCommand('copy');
+    const ok = document.execCommand('copy');
     area.remove();
-    return;
+    return ok;
   }
-  await navigator.clipboard.writeText(text);
-};
+}
+
+export function formatDateTime(dateIso: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(dateIso));
+}

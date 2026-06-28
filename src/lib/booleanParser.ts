@@ -1,378 +1,518 @@
-import type { AstNode, ParserResult } from '../types';
+import type { AstNode, BinaryOperator, BooleanValue, NotationInput, ParseFailure, ParseResult, Token, TokenType } from '../types';
 
-type OpTokenValue = 'AND' | 'OR' | 'NOT' | 'NAND' | 'NOR' | 'XOR' | 'XNOR';
+let nodeCounter = 0;
+const VARIABLE_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+const DEFAULT_VARIABLES = ['A', 'B', 'C', 'D', 'E', 'F'];
 
-type Token =
-  | { type: 'VAR'; value: string }
-  | { type: 'CONST'; value: '0' | '1' }
-  | { type: 'OP'; value: OpTokenValue }
-  | { type: 'LPAREN'; value: '(' }
-  | { type: 'RPAREN'; value: ')' }
-  | { type: 'POST_NOT'; value: "'" };
-
-const WORD_OPERATORS = new Set(['AND', 'OR', 'NOT', 'NAND', 'NOR', 'XOR', 'XNOR']);
-
-export class BooleanParseError extends Error {
-  suggestion?: string;
-
-  constructor(message: string, suggestion?: string) {
-    super(message);
-    this.name = 'BooleanParseError';
-    this.suggestion = suggestion;
-  }
+function isParseFailure(value: AstNode | ParseFailure): value is ParseFailure {
+  return 'ok' in value && value.ok === false;
 }
 
-const normalizeInput = (expression: string) => {
-  let trimmed = expression.trim();
-  if (!trimmed) {
-    throw new BooleanParseError('Expression is empty.', 'Type an expression like A.B + C\' or click an example.');
-  }
+function nextId(prefix = 'n'): string {
+  nodeCounter += 1;
+  return `${prefix}_${nodeCounter}`;
+}
 
-  const equalsIndex = trimmed.indexOf('=');
-  if (equalsIndex >= 0) {
-    trimmed = trimmed.slice(equalsIndex + 1).trim();
-  }
+function makeVar(name: string): AstNode {
+  return { id: nextId('v'), type: 'var', name, display: name };
+}
 
-  return trimmed
-    .replace(/[’`]/g, "'")
-    .replace(/∧/g, '.')
-    .replace(/∨/g, '+')
-    .replace(/¬/g, '!')
-    .replace(/⊕/g, ' XOR ')
-    .replace(/⊙/g, ' XNOR ')
-    .replace(/\s+/g, ' ')
-    .trim();
-};
+function makeConst(value: BooleanValue): AstNode {
+  return { id: nextId('c'), type: 'const', value, display: String(value) };
+}
 
-const isAlpha = (char: string) => /^[A-Za-z]$/.test(char);
-const isDigit = (char: string) => /^[0-9]$/.test(char);
+function makeNot(child: AstNode): AstNode {
+  const display = child.type === 'var' || child.type === 'const' ? `${child.display}'` : `(${child.display})'`;
+  return { id: nextId('not'), type: 'not', child, display };
+}
 
-export const tokenize = (expression: string): Token[] => {
-  const input = normalizeInput(expression);
+function makeBinary(op: BinaryOperator, left: AstNode, right: AstNode): AstNode {
+  const symbolMap: Record<BinaryOperator, string> = {
+    AND: '.',
+    OR: '+',
+    NAND: ' NAND ',
+    NOR: ' NOR ',
+    XOR: ' XOR ',
+    XNOR: ' XNOR ',
+  };
+  const compactOps: BinaryOperator[] = ['AND', 'OR'];
+  const sep = compactOps.includes(op) ? symbolMap[op] : symbolMap[op];
+  return {
+    id: nextId('bin'),
+    type: 'binary',
+    op,
+    left,
+    right,
+    display: `${wrapIfNeeded(left, op, 'left')}${sep}${wrapIfNeeded(right, op, 'right')}`,
+  };
+}
+
+function precedenceOfNode(node: AstNode): number {
+  if (node.type === 'var' || node.type === 'const') return 5;
+  if (node.type === 'not') return 4;
+  if (node.type !== 'binary') return 0;
+  if (node.op === 'AND' || node.op === 'NAND') return 3;
+  if (node.op === 'XOR' || node.op === 'XNOR') return 2;
+  return 1;
+}
+
+function precedenceOfOp(op: BinaryOperator): number {
+  if (op === 'AND' || op === 'NAND') return 3;
+  if (op === 'XOR' || op === 'XNOR') return 2;
+  return 1;
+}
+
+function wrapIfNeeded(node: AstNode, parentOp: BinaryOperator, side: 'left' | 'right'): string {
+  if (node.type !== 'binary') return node.display;
+  const childPrec = precedenceOfNode(node);
+  const parentPrec = precedenceOfOp(parentOp);
+  const needsWrap = childPrec < parentPrec || (side === 'right' && childPrec === parentPrec && node.op !== parentOp);
+  return needsWrap ? `(${node.display})` : node.display;
+}
+
+function stripAssignment(input: string): string {
+  const assignmentIndex = input.indexOf('=');
+  return assignmentIndex >= 0 ? input.slice(assignmentIndex + 1) : input;
+}
+
+function isOperandEnd(type: TokenType): boolean {
+  return type === 'VAR' || type === 'CONST' || type === 'RPAREN' || type === 'POST_NOT';
+}
+
+function isOperandStart(type: TokenType): boolean {
+  return type === 'VAR' || type === 'CONST' || type === 'LPAREN' || type === 'NOT';
+}
+
+export function tokenize(input: string): Token[] | ParseFailure {
+  const source = stripAssignment(input);
   const tokens: Token[] = [];
   let i = 0;
 
-  while (i < input.length) {
-    const char = input[i];
+  const push = (type: TokenType, value: string, position: number) => {
+    const previous = tokens[tokens.length - 1];
+    if (previous && isOperandEnd(previous.type) && isOperandStart(type)) {
+      tokens.push({ type: 'AND', value: '.', position });
+    }
+    tokens.push({ type, value, position });
+  };
 
+  while (i < source.length) {
+    const char = source[i];
     if (/\s/.test(char)) {
       i += 1;
       continue;
     }
 
+    const two = source.slice(i, i + 2);
+    if (two === '&&') {
+      push('AND', '&&', i);
+      i += 2;
+      continue;
+    }
+    if (two === '||') {
+      push('OR', '||', i);
+      i += 2;
+      continue;
+    }
+    if (two === '!=') {
+      push('XNOR', '!=', i);
+      i += 2;
+      continue;
+    }
+
     if (char === '(') {
-      tokens.push({ type: 'LPAREN', value: '(' });
+      push('LPAREN', char, i);
       i += 1;
       continue;
     }
-
     if (char === ')') {
-      tokens.push({ type: 'RPAREN', value: ')' });
+      push('RPAREN', char, i);
+      i += 1;
+      continue;
+    }
+    if (char === '0' || char === '1') {
+      push('CONST', char, i);
+      i += 1;
+      continue;
+    }
+    if (char === '!' || char === '~' || char === '¬') {
+      push('NOT', char, i);
+      i += 1;
+      continue;
+    }
+    if (char === "'" || char === '’') {
+      tokens.push({ type: 'POST_NOT', value: char, position: i });
+      i += 1;
+      continue;
+    }
+    if (char === '.' || char === '*' || char === '·' || char === '&') {
+      push('AND', char, i);
+      i += 1;
+      continue;
+    }
+    if (char === '+' || char === '|') {
+      push('OR', char, i);
+      i += 1;
+      continue;
+    }
+    if (char === '^' || char === '⊕') {
+      push('XOR', char, i);
+      i += 1;
+      continue;
+    }
+    if (char === '↑') {
+      push('NAND', char, i);
+      i += 1;
+      continue;
+    }
+    if (char === '↓') {
+      push('NOR', char, i);
+      i += 1;
+      continue;
+    }
+    if (char === '≡' || char === '↔') {
+      push('XNOR', char, i);
       i += 1;
       continue;
     }
 
-    if (char === "'") {
-      tokens.push({ type: 'POST_NOT', value: "'" });
-      i += 1;
-      continue;
-    }
-
-    if (char === '!' || char === '~') {
-      tokens.push({ type: 'OP', value: 'NOT' });
-      i += 1;
-      continue;
-    }
-
-    if (char === '.') {
-      tokens.push({ type: 'OP', value: 'AND' });
-      i += 1;
-      continue;
-    }
-
-    if (char === '+') {
-      tokens.push({ type: 'OP', value: 'OR' });
-      i += 1;
-      continue;
-    }
-
-    if (char === '&') {
-      if (input[i + 1] === '&') i += 1;
-      tokens.push({ type: 'OP', value: 'AND' });
-      i += 1;
-      continue;
-    }
-
-    if (char === '|') {
-      if (input[i + 1] === '|') i += 1;
-      tokens.push({ type: 'OP', value: 'OR' });
-      i += 1;
-      continue;
-    }
-
-    if (isDigit(char)) {
-      if (char !== '0' && char !== '1') {
-        throw new BooleanParseError(`Invalid constant "${char}".`, 'Only constants 0 and 1 are supported in Boolean expressions.');
-      }
-      tokens.push({ type: 'CONST', value: char });
-      i += 1;
-      continue;
-    }
-
-    if (isAlpha(char)) {
-      let word = '';
-      while (i < input.length && isAlpha(input[i])) {
-        word += input[i];
-        i += 1;
-      }
-
-      const upperWord = word.toUpperCase();
-      if (WORD_OPERATORS.has(upperWord)) {
-        tokens.push({ type: 'OP', value: upperWord as OpTokenValue });
+    if (/[A-Za-z]/.test(char)) {
+      let end = i + 1;
+      while (end < source.length && /[A-Za-z0-9_]/.test(source[end])) end += 1;
+      const raw = source.slice(i, end);
+      const upper = raw.toUpperCase();
+      const operatorWords: Record<string, TokenType> = {
+        AND: 'AND',
+        OR: 'OR',
+        NOT: 'NOT',
+        NAND: 'NAND',
+        NOR: 'NOR',
+        XOR: 'XOR',
+        XNOR: 'XNOR',
+      };
+      if (operatorWords[upper]) {
+        push(operatorWords[upper], upper, i);
       } else {
-        // Digital-logic variables are usually single letters. Treat ABC as A.B.C for beginner-friendly input.
-        [...upperWord].forEach((letter) => tokens.push({ type: 'VAR', value: letter }));
+        const variableName = upper;
+        if (!VARIABLE_PATTERN.test(variableName)) {
+          return {
+            ok: false,
+            error: `Invalid variable name "${raw}".`,
+            suggestion: 'Use variables like A, B, C, X, Y, Z, or names beginning with a letter.',
+            position: i,
+          };
+        }
+        push('VAR', variableName, i);
       }
+      i = end;
       continue;
     }
 
-    throw new BooleanParseError(`Unknown symbol "${char}".`, 'Use gate buttons or operators like ., +, !, NAND, XOR, and parentheses.');
+    return {
+      ok: false,
+      error: `Unknown symbol "${char}" found.`,
+      suggestion: 'Use supported operators: ., +, !, ~, AND, OR, NOT, NAND, NOR, XOR, XNOR, parentheses, and apostrophe complement.',
+      position: i,
+    };
   }
 
-  return insertImplicitAnd(tokens);
-};
-
-const canEndOperand = (token: Token) => token.type === 'VAR' || token.type === 'CONST' || token.type === 'RPAREN' || token.type === 'POST_NOT';
-const canStartOperand = (token: Token) => token.type === 'VAR' || token.type === 'CONST' || token.type === 'LPAREN' || (token.type === 'OP' && token.value === 'NOT');
-
-const insertImplicitAnd = (tokens: Token[]): Token[] => {
-  const out: Token[] = [];
-  for (let i = 0; i < tokens.length; i += 1) {
-    const current = tokens[i];
-    const previous = out[out.length - 1];
-    if (previous && canEndOperand(previous) && canStartOperand(current)) {
-      out.push({ type: 'OP', value: 'AND' });
-    }
-    out.push(current);
-  }
-  return out;
-};
+  return tokens;
+}
 
 class Parser {
   private index = 0;
 
   constructor(private readonly tokens: Token[]) {}
 
-  parse(): AstNode {
-    const node = this.parseOrLike();
-    if (!this.isAtEnd()) {
-      const token = this.peek();
-      throw new BooleanParseError(`Unexpected token "${token?.value}".`, 'Check for missing operators or extra parentheses.');
+  parse(): AstNode | ParseFailure {
+    if (this.tokens.length === 0) {
+      return {
+        ok: false,
+        error: 'Expression is empty.',
+        suggestion: 'Type an expression like A.B + C\' or click an example button.',
+      };
     }
-    return node;
-  }
-
-  private parseOrLike(): AstNode {
-    let left = this.parseAndLike();
-    while (this.matchOp(['OR', 'NOR', 'XOR', 'XNOR'])) {
-      const op = this.previous().value as 'OR' | 'NOR' | 'XOR' | 'XNOR';
-      const right = this.parseAndLike();
-      left = { type: 'binary', op, left, right };
-    }
-    return left;
-  }
-
-  private parseAndLike(): AstNode {
-    let left = this.parseUnary();
-    while (this.matchOp(['AND', 'NAND'])) {
-      const op = this.previous().value as 'AND' | 'NAND';
-      const right = this.parseUnary();
-      left = { type: 'binary', op, left, right };
-    }
-    return left;
-  }
-
-  private parseUnary(): AstNode {
-    if (this.matchOp(['NOT'])) {
-      return { type: 'not', child: this.parseUnary() };
-    }
-
-    let node = this.parsePrimary();
-    while (this.matchType('POST_NOT')) {
-      node = { type: 'not', child: node };
-    }
-    return node;
-  }
-
-  private parsePrimary(): AstNode {
-    if (this.matchType('VAR')) {
-      return { type: 'var', name: this.previous().value };
-    }
-
-    if (this.matchType('CONST')) {
-      return { type: 'const', value: Number(this.previous().value) as 0 | 1 };
-    }
-
-    if (this.matchType('LPAREN')) {
-      const expr = this.parseOrLike();
-      if (!this.matchType('RPAREN')) {
-        throw new BooleanParseError('Missing closing parenthesis.', 'Add a ) to close the grouped expression.');
-      }
-      return expr;
-    }
-
+    const expression = this.parseOrNor();
+    if (isParseFailure(expression)) return expression;
     const token = this.peek();
-    if (!token) {
-      throw new BooleanParseError('Expression ended unexpectedly.', 'Add a variable or constant after the operator.');
+    if (token) {
+      return {
+        ok: false,
+        error: `Unexpected token "${token.value}".`,
+        suggestion: 'Check for a missing operator or an extra closing parenthesis.',
+        position: token.position,
+      };
     }
-
-    if (token.type === 'RPAREN') {
-      throw new BooleanParseError('Extra closing parenthesis.', 'Remove the extra ) or add a matching (.');
-    }
-
-    throw new BooleanParseError(`Expected a variable, constant, or parenthesis but found "${token.value}".`, 'Check the expression near the highlighted operator.');
-  }
-
-  private matchOp(ops: OpTokenValue[]): boolean {
-    const token = this.peek();
-    if (token?.type === 'OP' && ops.includes(token.value as never)) {
-      this.index += 1;
-      return true;
-    }
-    return false;
-  }
-
-  private matchType(type: Token['type']): boolean {
-    if (this.peek()?.type === type) {
-      this.index += 1;
-      return true;
-    }
-    return false;
-  }
-
-  private previous(): Token {
-    return this.tokens[this.index - 1];
+    return expression;
   }
 
   private peek(): Token | undefined {
     return this.tokens[this.index];
   }
 
-  private isAtEnd() {
-    return this.index >= this.tokens.length;
+  private consume(): Token | undefined {
+    const token = this.tokens[this.index];
+    this.index += 1;
+    return token;
+  }
+
+  private match(...types: TokenType[]): Token | undefined {
+    const token = this.peek();
+    if (token && types.includes(token.type)) {
+      return this.consume();
+    }
+    return undefined;
+  }
+
+  private parseOrNor(): AstNode | ParseFailure {
+    let left = this.parseXorXnor();
+    if (isParseFailure(left)) return left;
+
+    while (this.peek()?.type === 'OR' || this.peek()?.type === 'NOR') {
+      const op = this.consume()!.type as BinaryOperator;
+      const right = this.parseXorXnor();
+      if (isParseFailure(right)) return right;
+      left = makeBinary(op, left, right);
+    }
+    return left;
+  }
+
+  private parseXorXnor(): AstNode | ParseFailure {
+    let left = this.parseAndNand();
+    if (isParseFailure(left)) return left;
+
+    while (this.peek()?.type === 'XOR' || this.peek()?.type === 'XNOR') {
+      const op = this.consume()!.type as BinaryOperator;
+      const right = this.parseAndNand();
+      if (isParseFailure(right)) return right;
+      left = makeBinary(op, left, right);
+    }
+    return left;
+  }
+
+  private parseAndNand(): AstNode | ParseFailure {
+    let left = this.parseUnary();
+    if (isParseFailure(left)) return left;
+
+    while (this.peek()?.type === 'AND' || this.peek()?.type === 'NAND') {
+      const op = this.consume()!.type as BinaryOperator;
+      const right = this.parseUnary();
+      if (isParseFailure(right)) return right;
+      left = makeBinary(op, left, right);
+    }
+    return left;
+  }
+
+  private parseUnary(): AstNode | ParseFailure {
+    if (this.match('NOT')) {
+      const child = this.parseUnary();
+      if (isParseFailure(child)) return child;
+      return makeNot(child);
+    }
+
+    let primary = this.parsePrimary();
+    if (isParseFailure(primary)) return primary;
+
+    while (this.match('POST_NOT')) {
+      primary = makeNot(primary);
+    }
+
+    return primary;
+  }
+
+  private parsePrimary(): AstNode | ParseFailure {
+    const token = this.peek();
+    if (!token) {
+      return {
+        ok: false,
+        error: 'Expression ended too early.',
+        suggestion: 'Add a variable, constant, or closing part after the last operator.',
+      };
+    }
+
+    if (this.match('VAR')) return makeVar(token.value);
+    if (this.match('CONST')) return makeConst(token.value === '1' ? 1 : 0);
+
+    if (this.match('LPAREN')) {
+      const expr = this.parseOrNor();
+      if (isParseFailure(expr)) return expr;
+      const close = this.match('RPAREN');
+      if (!close) {
+        return {
+          ok: false,
+          error: 'Missing closing parenthesis.',
+          suggestion: 'Add a ) to close the opened parenthesis.',
+          position: token.position,
+        };
+      }
+      return expr;
+    }
+
+    return {
+      ok: false,
+      error: `Unexpected "${token.value}" here.`,
+      suggestion: 'An expression part should start with a variable, 0, 1, NOT, or an opening parenthesis.',
+      position: token.position,
+    };
   }
 }
 
-export const parseBooleanExpression = (expression: string): ParserResult => {
-  const tokens = tokenize(expression);
+export function parseBooleanExpression(input: string): ParseResult {
+  nodeCounter = 0;
+  const tokens = tokenize(input);
+  if (!Array.isArray(tokens)) return tokens;
   const parser = new Parser(tokens);
   const ast = parser.parse();
-  const variables = Array.from(collectVariables(ast)).sort();
-  if (variables.length === 0) {
-    throw new BooleanParseError('No input variables found.', 'Use at least one variable such as A, B, or C.');
-  }
-  if (variables.length > 10) {
-    throw new BooleanParseError('Too many variables for a browser truth table.', 'Use 6 variables or fewer for smooth table generation.');
-  }
-  return { ast, variables, normalizedExpression: stringifyAst(ast) };
-};
-
-export const collectVariables = (node: AstNode, found = new Set<string>()): Set<string> => {
-  if (node.type === 'var') found.add(node.name);
-  if (node.type === 'not') collectVariables(node.child, found);
-  if (node.type === 'binary') {
-    collectVariables(node.left, found);
-    collectVariables(node.right, found);
-  }
-  return found;
-};
-
-const precedence = (node: AstNode): number => {
-  if (node.type === 'var' || node.type === 'const') return 5;
-  if (node.type === 'not') return 4;
-  if (node.type === 'binary' && (node.op === 'AND' || node.op === 'NAND')) return 3;
-  if (node.type === 'binary') return 2;
-  return 1;
-};
-
-export const stringifyAst = (node: AstNode, parentPrecedence = 0): string => {
-  if (node.type === 'var') return node.name;
-  if (node.type === 'const') return String(node.value);
-
-  if (node.type === 'not') {
-    const child = stringifyAst(node.child, precedence(node));
-    const needsWrap = node.child.type === 'binary';
-    return `${needsWrap ? `(${child})` : child}'`;
-  }
-
-  const opLabel: Record<string, string> = {
-    AND: '.',
-    OR: ' + ',
-    NAND: ' NAND ',
-    NOR: ' NOR ',
-    XOR: ' XOR ',
-    XNOR: ' XNOR '
+  if (isParseFailure(ast)) return ast;
+  const variables = collectVariables(ast);
+  return {
+    ok: true,
+    ast,
+    variables,
+    source: 'expression',
+    normalizedExpression: ast.display,
   };
-  const myPrecedence = precedence(node);
-  const left = stringifyAst(node.left, myPrecedence);
-  const right = stringifyAst(node.right, myPrecedence + 1);
-  const body = `${left}${opLabel[node.op]}${right}`;
-  return myPrecedence < parentPrecedence ? `(${body})` : body;
-};
+}
 
-export const evaluateAst = (
-  node: AstNode,
-  assignment: Record<string, boolean>,
-  intermediate: Record<string, boolean>,
-  rootLabel?: string
-): boolean => {
-  if (node.type === 'var') return Boolean(assignment[node.name]);
-  if (node.type === 'const') return node.value === 1;
-
-  let value: boolean;
-  if (node.type === 'not') {
-    value = !evaluateAst(node.child, assignment, intermediate, rootLabel);
-  } else {
-    const left = evaluateAst(node.left, assignment, intermediate, rootLabel);
-    const right = evaluateAst(node.right, assignment, intermediate, rootLabel);
-    switch (node.op) {
-      case 'AND':
-        value = left && right;
-        break;
-      case 'OR':
-        value = left || right;
-        break;
-      case 'NAND':
-        value = !(left && right);
-        break;
-      case 'NOR':
-        value = !(left || right);
-        break;
-      case 'XOR':
-        value = left !== right;
-        break;
-      case 'XNOR':
-        value = left === right;
-        break;
-      default:
-        value = false;
+export function collectVariables(node: AstNode): string[] {
+  const set = new Set<string>();
+  const visit = (current: AstNode): void => {
+    if (current.type === 'var') set.add(current.name);
+    if (current.type === 'not') visit(current.child);
+    if (current.type === 'binary') {
+      visit(current.left);
+      visit(current.right);
     }
+  };
+  visit(node);
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+export function parseNotationInput(input: string): NotationInput | ParseFailure | null {
+  const text = input.trim();
+  if (!text) return null;
+  const compact = text.replace(/\s+/g, '');
+  const hasMinterm = /[Σ∑]/.test(compact) || /sigma|sum/i.test(compact) || /^m\(/.test(compact);
+  const hasMaxterm = /[Π∏]/.test(compact) || /pi|prod/i.test(compact) || /^M\(/.test(compact);
+  if (!hasMinterm && !hasMaxterm) return null;
+
+  const source: 'minterm' | 'maxterm' = hasMaxterm ? 'maxterm' : 'minterm';
+  const varMatch = compact.match(/^[A-Za-z]+\(([^)]*)\)=/);
+  let variables = varMatch?.[1]
+    ? varMatch[1]
+        .split(',')
+        .map((item) => item.toUpperCase())
+        .filter(Boolean)
+    : [];
+
+  if (variables.some((variable) => !VARIABLE_PATTERN.test(variable))) {
+    return {
+      ok: false,
+      error: 'Invalid variable list in notation.',
+      suggestion: 'Use a notation like F(A,B,C)=Σm(0,2,4,6).',
+    };
   }
 
-  const label = stringifyAst(node);
-  if (label !== rootLabel) intermediate[label] = value;
+  const allParens = [...compact.matchAll(/\(([^()]*)\)/g)];
+  const indexText = allParens[allParens.length - 1]?.[1] ?? '';
+  if (!indexText.length) {
+    return {
+      ok: false,
+      error: source === 'minterm' ? 'Minterm list is empty.' : 'Maxterm list is empty.',
+      suggestion: 'Write comma-separated indices, for example Σm(0,2,4,6).',
+    };
+  }
+
+  const rawIndices = indexText.split(',').filter((item) => item.length > 0);
+  if (rawIndices.some((item) => !/^\d+$/.test(item))) {
+    return {
+      ok: false,
+      error: 'Invalid index found in notation.',
+      suggestion: 'Minterms and maxterms must be non-negative integers separated by commas.',
+    };
+  }
+
+  const indices = Array.from(new Set(rawIndices.map((item) => Number(item)))).sort((a, b) => a - b);
+  const largest = Math.max(...indices, 0);
+  if (variables.length === 0) {
+    const bitCount = Math.max(1, Math.ceil(Math.log2(largest + 1)));
+    variables = DEFAULT_VARIABLES.slice(0, bitCount);
+  }
+
+  const maxIndex = 2 ** variables.length - 1;
+  const invalid = indices.find((index) => index < 0 || index > maxIndex);
+  if (invalid !== undefined) {
+    return {
+      ok: false,
+      error: `Index ${invalid} is outside the valid range for ${variables.length} variables.`,
+      suggestion: `For ${variables.length} variables, valid indices are 0 to ${maxIndex}.`,
+    };
+  }
+
+  return {
+    variables,
+    indices,
+    source,
+    normalizedExpression: `${source === 'minterm' ? 'Σm' : 'ΠM'}(${indices.join(',')})`,
+  };
+}
+
+export function evaluateAst(node: AstNode, values: Record<string, BooleanValue>, intermediates?: Record<string, BooleanValue>): BooleanValue {
+  const result = evaluateNode(node, values, intermediates);
+  return result;
+}
+
+function evaluateNode(node: AstNode, values: Record<string, BooleanValue>, intermediates?: Record<string, BooleanValue>): BooleanValue {
+  let value: BooleanValue;
+  if (node.type === 'var') value = values[node.name] ?? 0;
+  else if (node.type === 'const') value = node.value;
+  else if (node.type === 'not') value = invert(evaluateNode(node.child, values, intermediates));
+  else {
+    const left = evaluateNode(node.left, values, intermediates);
+    const right = evaluateNode(node.right, values, intermediates);
+    value = evaluateBinary(node.op, left, right);
+  }
+
+  if (intermediates && (node.type === 'not' || node.type === 'binary')) {
+    intermediates[node.display] = value;
+  }
   return value;
-};
+}
 
-export const collectIntermediateLabels = (node: AstNode, rootLabel = stringifyAst(node), labels: string[] = []): string[] => {
-  if (node.type === 'binary') {
-    collectIntermediateLabels(node.left, rootLabel, labels);
-    collectIntermediateLabels(node.right, rootLabel, labels);
+function evaluateBinary(op: BinaryOperator, left: BooleanValue, right: BooleanValue): BooleanValue {
+  switch (op) {
+    case 'AND':
+      return left && right ? 1 : 0;
+    case 'OR':
+      return left || right ? 1 : 0;
+    case 'NAND':
+      return left && right ? 0 : 1;
+    case 'NOR':
+      return left || right ? 0 : 1;
+    case 'XOR':
+      return left !== right ? 1 : 0;
+    case 'XNOR':
+      return left === right ? 1 : 0;
   }
-  if (node.type === 'not') collectIntermediateLabels(node.child, rootLabel, labels);
-  if (node.type !== 'var' && node.type !== 'const') {
-    const label = stringifyAst(node);
-    if (label !== rootLabel && !labels.includes(label)) labels.push(label);
-  }
-  return labels;
-};
+}
+
+function invert(value: BooleanValue): BooleanValue {
+  return value === 1 ? 0 : 1;
+}
+
+export function collectIntermediateLabels(node: AstNode): string[] {
+  const labels: string[] = [];
+  const visit = (current: AstNode): void => {
+    if (current.type === 'not') {
+      visit(current.child);
+      labels.push(current.display);
+    }
+    if (current.type === 'binary') {
+      visit(current.left);
+      visit(current.right);
+      labels.push(current.display);
+    }
+  };
+  visit(node);
+  return Array.from(new Set(labels));
+}

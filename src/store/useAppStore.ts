@@ -1,147 +1,119 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { AppSettings, PanelState, SavedExpression } from '../types';
+import type { AppSettings, HistoryItem, PanelState, SavedProject, ThemeMode } from '../types';
 
-const defaultPanels = {
-  expression: { collapsed: false, hidden: false, minimized: false },
-  gates: { collapsed: false, hidden: false, minimized: false },
-  table: { collapsed: false, hidden: false, minimized: false },
-  simplification: { collapsed: false, hidden: false, minimized: false },
-  explanation: { collapsed: true, hidden: false, minimized: false },
-  settings: { collapsed: true, hidden: false, minimized: false },
-  history: { collapsed: true, hidden: false, minimized: false }
-} satisfies Record<string, PanelState>;
-
-const defaultSettings: AppSettings = {
-  variableOrder: ['A', 'B', 'C', 'D', 'E', 'F'],
-  outputFormat: 'binary',
-  showIntermediate: true,
-  autoGenerate: true,
-  showSopPos: true,
-  learningMode: false,
-  theme: 'system',
-  maxRowsPerPage: 32
-};
-
-type AppState = {
+interface AppStore {
   expression: string;
-  cursorPosition: number;
+  theme: ThemeMode;
   settings: AppSettings;
-  history: SavedExpression[];
+  history: HistoryItem[];
   panelStates: Record<string, PanelState>;
   setExpression: (expression: string) => void;
-  setCursorPosition: (position: number) => void;
+  setTheme: (theme: ThemeMode) => void;
   updateSettings: (settings: Partial<AppSettings>) => void;
-  setVariableOrderFromText: (text: string) => void;
-  insertAtCursor: (text: string) => void;
-  backspaceAtCursor: () => void;
-  clearExpression: () => void;
-  saveExpression: (expression?: string) => void;
-  loadExpression: (expression: string) => void;
+  addToHistory: (expression: string) => void;
   deleteHistoryItem: (id: string) => void;
+  clearHistory: () => void;
   toggleFavorite: (id: string) => void;
-  togglePanel: (panelId: string, key: keyof PanelState) => void;
-  showPanel: (panelId: string) => void;
+  setPanelState: (panelId: string, state: Partial<PanelState>) => void;
   resetApp: () => void;
-  importProject: (data: Partial<Pick<AppState, 'expression' | 'settings' | 'history' | 'panelStates'>>) => void;
+  importProject: (project: SavedProject) => void;
+}
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  variableOrder: ['A', 'B', 'C', 'D', 'E', 'F'],
+  outputFormat: 'binary',
+  showIntermediateColumns: true,
+  generateMode: 'auto',
+  showSopPos: true,
+  learningMode: true,
+  maxVariables: 6,
+  rowsPerPage: 32,
 };
 
-const makeSavedExpression = (expression: string): SavedExpression => ({
-  id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
-  expression,
-  createdAt: new Date().toISOString(),
-  favorite: false
-});
+const DEFAULT_PANEL_STATE: PanelState = {
+  collapsed: false,
+  hidden: false,
+  minimized: false,
+};
 
-export const useAppStore = create<AppState>()(
+const initialPanels: Record<string, PanelState> = {
+  expression: { ...DEFAULT_PANEL_STATE },
+  gates: { ...DEFAULT_PANEL_STATE },
+  table: { ...DEFAULT_PANEL_STATE },
+  simplification: { ...DEFAULT_PANEL_STATE },
+  explanation: { ...DEFAULT_PANEL_STATE, collapsed: true },
+  settings: { ...DEFAULT_PANEL_STATE, collapsed: true },
+  history: { ...DEFAULT_PANEL_STATE, collapsed: true },
+};
+
+export const useAppStore = create<AppStore>()(
   persist(
     (set, get) => ({
       expression: 'A.B + C\'',
-      cursorPosition: 0,
-      settings: defaultSettings,
+      theme: 'system',
+      settings: DEFAULT_SETTINGS,
       history: [],
-      panelStates: defaultPanels,
-
+      panelStates: initialPanels,
       setExpression: (expression) => set({ expression }),
-      setCursorPosition: (cursorPosition) => set({ cursorPosition }),
-      updateSettings: (patch) => set((state) => ({ settings: { ...state.settings, ...patch } })),
-      setVariableOrderFromText: (text) => {
-        const variableOrder = text
-          .toUpperCase()
-          .replace(/[^A-Z]/g, '')
-          .split('')
-          .filter((value, index, array) => array.indexOf(value) === index)
-          .slice(0, 10);
-        set((state) => ({ settings: { ...state.settings, variableOrder } }));
-      },
-      insertAtCursor: (text) => {
-        const { expression, cursorPosition } = get();
-        const before = expression.slice(0, cursorPosition);
-        const after = expression.slice(cursorPosition);
-        set({ expression: `${before}${text}${after}`, cursorPosition: cursorPosition + text.length });
-      },
-      backspaceAtCursor: () => {
-        const { expression, cursorPosition } = get();
-        if (cursorPosition <= 0) return;
-        set({
-          expression: expression.slice(0, cursorPosition - 1) + expression.slice(cursorPosition),
-          cursorPosition: cursorPosition - 1
-        });
-      },
-      clearExpression: () => set({ expression: '', cursorPosition: 0 }),
-      saveExpression: (expression = get().expression) => {
+      setTheme: (theme) => set({ theme }),
+      updateSettings: (settings) => set((state) => ({ settings: { ...state.settings, ...settings } })),
+      addToHistory: (expression) => {
         const clean = expression.trim();
         if (!clean) return;
-        set((state) => {
-          const existing = state.history.find((item) => item.expression === clean);
-          if (existing) {
-            return {
-              history: [existing, ...state.history.filter((item) => item.id !== existing.id)].slice(0, 40)
-            };
-          }
-          return { history: [makeSavedExpression(clean), ...state.history].slice(0, 40) };
-        });
+        const existing = get().history.find((item) => item.expression === clean);
+        if (existing) {
+          set((state) => ({
+            history: [
+              { ...existing, createdAt: new Date().toISOString() },
+              ...state.history.filter((item) => item.id !== existing.id),
+            ].slice(0, 30),
+          }));
+          return;
+        }
+        const item: HistoryItem = {
+          id: crypto.randomUUID(),
+          expression: clean,
+          createdAt: new Date().toISOString(),
+          favorite: false,
+        };
+        set((state) => ({ history: [item, ...state.history].slice(0, 30) }));
       },
-      loadExpression: (expression) => set({ expression, cursorPosition: expression.length }),
       deleteHistoryItem: (id) => set((state) => ({ history: state.history.filter((item) => item.id !== id) })),
+      clearHistory: () => set({ history: [] }),
       toggleFavorite: (id) =>
         set((state) => ({
-          history: state.history.map((item) => (item.id === id ? { ...item, favorite: !item.favorite } : item))
+          history: state.history.map((item) => (item.id === id ? { ...item, favorite: !item.favorite } : item)),
         })),
-      togglePanel: (panelId, key) =>
-        set((state) => ({
+      setPanelState: (panelId, state) =>
+        set((store) => ({
           panelStates: {
-            ...state.panelStates,
-            [panelId]: {
-              ...(state.panelStates[panelId] ?? { collapsed: false, hidden: false, minimized: false }),
-              [key]: !state.panelStates[panelId]?.[key]
-            }
-          }
+            ...store.panelStates,
+            [panelId]: { ...(store.panelStates[panelId] ?? DEFAULT_PANEL_STATE), ...state },
+          },
         })),
-      showPanel: (panelId) =>
-        set((state) => ({
-          panelStates: {
-            ...state.panelStates,
-            [panelId]: { ...(state.panelStates[panelId] ?? defaultPanels.expression), hidden: false, minimized: false }
-          }
-        })),
-      resetApp: () => set({ expression: 'A.B + C\'', cursorPosition: 0, settings: defaultSettings, panelStates: defaultPanels }),
-      importProject: (data) =>
-        set((state) => ({
-          expression: data.expression ?? state.expression,
-          settings: data.settings ? { ...state.settings, ...data.settings } : state.settings,
-          history: data.history ?? state.history,
-          panelStates: data.panelStates ? { ...state.panelStates, ...data.panelStates } : state.panelStates
-        }))
+      resetApp: () =>
+        set({
+          expression: 'A.B + C\'',
+          settings: DEFAULT_SETTINGS,
+          panelStates: initialPanels,
+        }),
+      importProject: (project) =>
+        set({
+          expression: project.expression || '',
+          settings: { ...DEFAULT_SETTINGS, ...project.settings },
+          history: Array.isArray(project.history) ? project.history : get().history,
+        }),
     }),
     {
       name: 'truthcraft-app-state',
       partialize: (state) => ({
         expression: state.expression,
+        theme: state.theme,
         settings: state.settings,
         history: state.history,
-        panelStates: state.panelStates
-      })
-    }
-  )
+        panelStates: state.panelStates,
+      }),
+    },
+  ),
 );
