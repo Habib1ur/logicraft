@@ -114,8 +114,13 @@ export function tokenize(input: string): Token[] | ParseFailure {
       i += 2;
       continue;
     }
+    if (two === '==') {
+      push('XNOR', '==', i);
+      i += 2;
+      continue;
+    }
     if (two === '!=') {
-      push('XNOR', '!=', i);
+      push('XOR', '!=', i);
       i += 2;
       continue;
     }
@@ -392,12 +397,15 @@ export function parseNotationInput(input: string): NotationInput | ParseFailure 
   const text = input.trim();
   if (!text) return null;
   const compact = text.replace(/\s+/g, '');
-  const hasMinterm = /[Σ∑]/.test(compact) || /sigma|sum/i.test(compact) || /^m\(/.test(compact);
-  const hasMaxterm = /[Π∏]/.test(compact) || /pi|prod/i.test(compact) || /^M\(/.test(compact);
+
+  const varMatch = compact.match(/^[A-Za-z]+\(([^)]*)\)=/);
+  const rest = varMatch ? compact.slice(varMatch[0].length) : compact;
+
+  const hasMinterm = /[Σ∑]/.test(rest) || /sigma|sum/i.test(rest) || /^m\(/.test(rest);
+  const hasMaxterm = /[Π∏]/.test(rest) || /pi|prod/i.test(rest) || /^M\(/.test(rest);
   if (!hasMinterm && !hasMaxterm) return null;
 
   const source: 'minterm' | 'maxterm' = hasMaxterm ? 'maxterm' : 'minterm';
-  const varMatch = compact.match(/^[A-Za-z]+\(([^)]*)\)=/);
   let variables = varMatch?.[1]
     ? varMatch[1]
         .split(',')
